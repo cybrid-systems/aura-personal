@@ -1,0 +1,13 @@
+initial=incubating
+one=#f
+eligible=#t
+handoff=#t
+status=graduated
+tag=#f
+release=#f
+daily=#f
+inception=#t
+escalate=#t
+takeover=takeover
+expired=graduated
+dispatch-after=#f

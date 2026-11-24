@@ -1,0 +1,12 @@
+claim=#t
+claim-empty=no-queued-task
+recovered=1
+claim-again=#t
+complete=#t
+tool-read=#t
+tool-shell=#f
+spend=#t
+frozen-before=#f
+spend-over=#f
+frozen=#t
+audit=#t

@@ -1,0 +1,9 @@
+default=#f
+approved=#t
+expired=#f
+timeout=#f
+timeout-status=#t
+grant-none=#f
+grant-hit=#t
+grant-miss=#f
+grant-expired=#f

@@ -1,0 +1,123 @@
+;; PR-2 (#40): approval is separate from the agent that proposes an action.
+;;
+;; An external action needs an approved request (or an explicit scoped
+;; grant), and both expire. Timeout is a deny. The agent/evaluator never
+;; holds a permanent keep/act right; the default is refusal.
+
+(require "std/string")
+(require "std/list")
+
+(export approve:new approve:request approve:decide approve:tick
+        approve:authorized? approve:grant approve:allow? approve:audit
+        approve:help)
+
+(define (ap-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (ap-num h k d) (let ((v (ap-get h k d))) (if (number? v) v d)))
+(define (ap-list h k) (let ((v (ap-get h k '()))) (if (list? v) v '())))
+
+(define (approve:help)
+  "Approval: (approve:request s id action target timeout_ms now); (approve:decide s id decision now); (approve:authorized? s id now)")
+
+(define (ap-audit! s event)
+  (hash-set! s "audit" (cons event (ap-list s "audit")))
+  s)
+
+(define (approve:new) (hash "kind" "personal-approval"
+                             "next_id" 1 "requests" '() "grants" '()
+                             "audit" '()))
+
+(define (ap-find s id)
+  (let loop ((xs (ap-list s "requests")))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (ap-get (car xs) "id" "") id) (car xs))
+          (else (loop (cdr xs))))))
+
+(define (approve:request s id action target timeout_ms now)
+  (let* ((now (if (number? now) now 0))
+         (rid (if (and (string? id) (> (string-length id) 0))
+                id
+                (string-append "req-" (number->string (ap-num s "next_id" 1)))))
+         (timeout (if (number? timeout_ms) timeout_ms 30000))
+         (row (hash "id" rid
+                    "action" (if (string? action) action "")
+                    "target" (if (string? target) target "")
+                    "status" "pending"
+                    "created_ms" now
+                    "expires_ms" (+ now timeout))))
+    (hash-set! s "next_id" (+ 1 (ap-num s "next_id" 1)))
+    (hash-set! s "requests" (append (ap-list s "requests") (list row)))
+    (ap-audit! s (hash "event" "request" "id" rid "action" (ap-get row "action" "")))))
+
+(define (approve:decide s id decision now)
+  (let* ((now (if (number? now) now 0))
+         (d (if (string? decision) decision "denied"))
+         (ok (or (equal? d "approved") (equal? d "denied")))
+         (found (ap-find s id)))
+    (cond
+      ((not found)
+       (ap-audit! s (hash "event" "decide-unknown" "id" (if (string? id) id ""))))
+      ((not (equal? (ap-get found "status" "") "pending"))
+       (ap-audit! s (hash "event" "decide-not-pending" "id" id
+                          "status" (ap-get found "status" ""))))
+      ((not ok)
+       (ap-audit! s (hash "event" "decide-invalid" "id" id "decision" d)))
+      (else
+       (hash-set! found "status" d)
+       (hash-set! found "decided_ms" now)
+       (ap-audit! s (hash "event" "decide" "id" id "decision" d))))
+    s))
+
+(define (approve:tick s now)
+  (let ((now (if (number? now) now 0)))
+    (for-each
+      (lambda (r)
+        (if (and (equal? (ap-get r "status" "") "pending")
+                 (>= now (ap-num r "expires_ms" 0)))
+          (begin
+            (hash-set! r "status" "denied")
+            (hash-set! r "reason" "timeout")
+            (hash-set! r "decided_ms" now)
+            (ap-audit! s (hash "event" "timeout" "id" (ap-get r "id" ""))))))
+      (ap-list s "requests"))
+    s))
+
+(define (approve:authorized? s id now)
+  (let* ((now (if (number? now) now 0))
+         (r (ap-find s id)))
+    (and r
+         (equal? (ap-get r "status" "") "approved")
+         (< now (ap-num r "expires_ms" 0)))))
+
+(define (approve:grant s actions targets expires_ms now)
+  (let* ((now (if (number? now) now 0))
+         (row (hash "actions" (if (list? actions) actions '())
+                    "targets" (if (list? targets) targets '())
+                    "expires_ms" (+ now (if (number? expires_ms) expires_ms 60000))
+                    "created_ms" now)))
+    (hash-set! s "grants" (append (ap-list s "grants") (list row)))
+    (ap-audit! s (hash "event" "grant" "actions" (ap-get row "actions" '())
+                       "targets" (ap-get row "targets" '())))
+    s))
+
+(define (ap-member? x xs)
+  (let loop ((ys xs))
+    (cond ((not (pair? ys)) #f)
+          ((equal? x (car ys)) #t)
+          (else (loop (cdr ys))))))
+
+(define (approve:allow? s action target now)
+  (let ((now (if (number? now) now 0))
+        (action (if (string? action) action ""))
+        (target (if (string? target) target "")))
+    (let loop ((gs (ap-list s "grants")))
+      (cond
+        ((not (pair? gs)) #f)
+        ((and (< now (ap-num (car gs) "expires_ms" 0))
+              (or (null? (ap-get (car gs) "actions" '()))
+                  (ap-member? action (ap-get (car gs) "actions" '())))
+              (or (null? (ap-get (car gs) "targets" '()))
+                  (ap-member? target (ap-get (car gs) "targets" '()))))
+         #t)
+        (else (loop (cdr gs)))))))
+
+(define (approve:audit s) (reverse (ap-list s "audit")))

@@ -1,0 +1,8 @@
+ok=#t
+delivered=3
+timers=0
+active-watches=0
+webhook=data-only
+degraded=persistent-cron:aura#5414,inbound-http:aura#5415
+second-delivered=0
+frozen=#t

@@ -1,0 +1,135 @@
+;; PR-1 (#39): single-user long-lived inbox.
+;;
+;; The loop owns timers, inbound messages, webhook-shaped input and
+;; cancellable watches. Inbound content is data only: it never creates a
+;; grant, capability or approval exemption. The kernel gaps (persistent
+;; cron, inbound HTTP server) stay reported as degraded rather than
+;; emulated as if they existed.
+
+(require "std/string")
+(require "std/list")
+
+(export inbox:new inbox:message! inbox:timer! inbox:watch! inbox:cancel!
+        inbox:webhook inbox:tick inbox:active-watches inbox:audit inbox:help)
+
+(define (ib-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (ib-num h k d) (let ((v (ib-get h k d))) (if (number? v) v d)))
+(define (ib-list h k) (let ((v (ib-get h k '()))) (if (list? v) v '())))
+
+(define (inbox:help)
+  "Inbox: (inbox:new opts); (inbox:message! s text source); (inbox:timer! s id due text); (inbox:tick s now_ms)")
+
+(define (ib-audit! s event)
+  (hash-set! s "audit" (cons event (ib-list s "audit")))
+  s)
+
+(define (inbox:new opts)
+  (let* ((o (if (hash? opts) opts (hash)))
+         (budget (let ((n (ib-num o "budget_ms" 60000)))
+                   (if (> n 0) n 60000))))
+    (hash "kind" "personal-inbox"
+          "now_ms" 0
+          "next_id" 1
+          "messages" '()
+          "timers" '()
+          "watches" '()
+          "delivered" '()
+          "spent_ms" 0
+          "budget_ms" budget
+          "frozen" #f
+          "degraded" (list "persistent-cron:aura#5414"
+                           "inbound-http:aura#5415")
+          "audit" '())))
+
+(define (inbox:message! s text source)
+  (let* ((id (string-append "msg-" (number->string (ib-num s "next_id" 1))))
+         (row (hash "id" id
+                    "text" (if (string? text) text "")
+                    "source" (if (string? source) source "stdin")
+                    "at_ms" (ib-num s "now_ms" 0))))
+    (hash-set! s "next_id" (+ 1 (ib-num s "next_id" 1)))
+    (hash-set! s "messages" (append (ib-list s "messages") (list row)))
+    (ib-audit! s (hash "event" "message" "id" id "source" (ib-get row "source" "")))))
+
+(define (inbox:timer! s id due_ms text)
+  (let ((row (hash "id" (if (string? id) id "timer")
+                   "due_ms" (if (number? due_ms) due_ms 0)
+                   "text" (if (string? text) text ""))))
+    (hash-set! s "timers" (append (ib-list s "timers") (list row)))
+    (ib-audit! s (hash "event" "timer" "id" (ib-get row "id" "") "due_ms" (ib-get row "due_ms" 0)))))
+
+(define (inbox:watch! s id label)
+  (let ((row (hash "id" (if (string? id) id "watch")
+                   "label" (if (string? label) label "")
+                   "status" "active")))
+    (hash-set! s "watches" (append (ib-list s "watches") (list row)))
+    (ib-audit! s (hash "event" "watch" "id" (ib-get row "id" "")))))
+
+(define (inbox:cancel! s id)
+  (let ((found #f))
+    (hash-set! s "watches"
+               (map (lambda (w)
+                      (if (equal? (ib-get w "id" "") id)
+                        (begin (set! found #t) (hash-set w "status" "cancelled"))
+                        w))
+                    (ib-list s "watches")))
+    (ib-audit! s (hash "event" (if found "watch-cancelled" "watch-unknown")
+                       "id" (if (string? id) id "")))
+    s))
+
+(define (inbox:active-watches s)
+  (filter (lambda (w) (equal? (ib-get w "status" "") "active"))
+          (ib-list s "watches")))
+
+(define (inbox:webhook s body)
+  ;; The body is data. It is stored as a message with an ingest source;
+  ;; there is deliberately no path from here to a grant or capability.
+  (let ((s (inbox:message! s body "webhook")))
+    (hash-set! s "last_webhook" "data-only")
+    s))
+
+(define (inbox:tick s now_ms)
+  (let* ((now (if (number? now_ms) now_ms 0))
+         (budget (ib-num s "budget_ms" 0))
+         (spent (ib-num s "spent_ms" 0))
+         (frozen (or (equal? (ib-get s "frozen" #f) #t) (>= spent budget))))
+    (hash-set! s "now_ms" now)
+    (hash-set! s "frozen" frozen)
+    (if frozen
+      (begin
+        (ib-audit! s (hash "event" "budget-freeze" "spent_ms" spent))
+        (hash "ok" #f "frozen" #t "delivered" '()
+              "timers" (length (ib-list s "timers"))
+              "active_watches" (length (inbox:active-watches s))
+              "degraded" (ib-list s "degraded")
+              "audit" (ib-list s "audit")))
+      (let* ((due
+               (filter (lambda (t) (<= (ib-num t "due_ms" 0) now))
+                       (ib-list s "timers")))
+             (keep
+               (filter (lambda (t) (> (ib-num t "due_ms" 0) now))
+                       (ib-list s "timers")))
+             (msgs (ib-list s "messages"))
+             (deliveries
+               (append
+                 (map (lambda (m) (hash "kind" "message"
+                                        "id" (ib-get m "id" "")
+                                        "text" (ib-get m "text" "")))
+                      msgs)
+                 (map (lambda (t) (hash "kind" "timer"
+                                        "id" (ib-get t "id" "")
+                                        "text" (ib-get t "text" "")))
+                      due))))
+        (hash-set! s "timers" keep)
+        (hash-set! s "messages" '())
+        (hash-set! s "delivered" (append (ib-list s "delivered") deliveries))
+        (hash-set! s "spent_ms" (+ spent 1))
+        (ib-audit! s (hash "event" "tick" "delivered" (length deliveries)))
+        (hash "ok" #t "frozen" #f
+              "delivered" deliveries
+              "timers" (length keep)
+              "active_watches" (length (inbox:active-watches s))
+              "degraded" (ib-list s "degraded")
+              "audit" (ib-list s "audit"))))))
+
+(define (inbox:audit s) (reverse (ib-list s "audit")))

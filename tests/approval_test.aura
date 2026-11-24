@@ -1,0 +1,21 @@
+;; #40: default deny, explicit approval, timeout deny, scoped grant.
+(require "std/string")
+(require "runtime/approval")
+
+(define (line k v) (display k) (display "=") (display v) (newline))
+
+(define s (approve:new))
+(line "default" (approve:authorized? s "r0" 0))
+(define s (approve:request s "r1" "send" "chat:alice" 1000 0))
+(define s (approve:decide s "r1" "approved" 100))
+(line "approved" (approve:authorized? s "r1" 200))
+(line "expired" (approve:authorized? s "r1" 1200))
+(define s (approve:request s "r2" "send" "chat:bob" 100 0))
+(define s (approve:tick s 200))
+(line "timeout" (approve:authorized? s "r2" 250))
+(line "timeout-status" (string-contains? (string-join (map (lambda (a) (hash-ref a "event")) (approve:audit s)) ",") "timeout"))
+(line "grant-none" (approve:allow? s "http-get" "example.com" 0))
+(define s (approve:grant s (list "http-get") (list "example.com") 1000 0))
+(line "grant-hit" (approve:allow? s "http-get" "example.com" 500))
+(line "grant-miss" (approve:allow? s "http-get" "other.com" 500))
+(line "grant-expired" (approve:allow? s "http-get" "example.com" 1500))

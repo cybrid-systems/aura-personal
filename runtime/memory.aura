@@ -1,0 +1,119 @@
+;; PR-3 (#41): single-user cross-session memory with provenance.
+;;
+;; A memory can be PINned, challenged or withdrawn. A withdrawn memory is
+;; not an approved fact and recall excludes it. Persistence is the repo's
+;; own JSON file; this is the per-user store, not a second experience graph.
+
+(require "std/string")
+(require "std/list")
+(require "std/json")
+(require "std/fs")
+
+(export memory:new memory:remember memory:pin memory:unpin memory:challenge
+        memory:withdraw memory:recall memory:authority? memory:save
+        memory:load memory:audit memory:help)
+
+(define (mm-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (mm-num h k d) (let ((v (mm-get h k d))) (if (number? v) v d)))
+(define (mm-list h k) (let ((v (mm-get h k '()))) (if (list? v) v '())))
+
+(define (memory:help)
+  "Memory: (memory:remember s text source); (memory:pin s id); (memory:challenge s id reason); (memory:withdraw s id reason); (memory:recall s q)")
+
+(define (mm-audit! s event)
+  (hash-set! s "audit" (cons event (mm-list s "audit")))
+  s)
+
+(define (memory:new opts)
+  (let ((o (if (hash? opts) opts (hash))))
+    (hash "kind" "personal-memory"
+          "tenant" (mm-get o "tenant" 1)
+          "next_id" 1
+          "entries" '()
+          "audit" '())))
+
+(define (mm-find s id)
+  (let loop ((xs (mm-list s "entries")))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (mm-get (car xs) "id" "") id) (car xs))
+          (else (loop (cdr xs))))))
+
+(define (memory:remember s text source)
+  (let* ((id (string-append "mem-" (number->string (mm-num s "next_id" 1))))
+         (row (hash "id" id
+                    "text" (if (string? text) text "")
+                    "source" (if (string? source) source "user")
+                    "provenance" (if (string? source) source "user")
+                    "status" "valid"
+                    "pinned" #f
+                    "reason" "")))
+    (hash-set! s "next_id" (+ 1 (mm-num s "next_id" 1)))
+    (hash-set! s "entries" (append (mm-list s "entries") (list row)))
+    (mm-audit! s (hash "event" "remember" "id" id "source" (mm-get row "source" "")))))
+
+(define (memory:pin s id)
+  (let ((e (mm-find s id)))
+    (if e
+      (begin (hash-set! e "pinned" #t)
+             (mm-audit! s (hash "event" "pin" "id" id)))
+      (mm-audit! s (hash "event" "pin-unknown" "id" (if (string? id) id ""))))
+    s))
+
+(define (memory:unpin s id)
+  (let ((e (mm-find s id)))
+    (if e
+      (begin (hash-set! e "pinned" #f)
+             (mm-audit! s (hash "event" "unpin" "id" id))))
+    s))
+
+(define (memory:challenge s id reason)
+  (let ((e (mm-find s id)))
+    (if e
+      (begin (hash-set! e "status" "challenged")
+             (hash-set! e "reason" (if (string? reason) reason ""))
+             (mm-audit! s (hash "event" "challenge" "id" id
+                                "reason" (mm-get e "reason" ""))))
+      (mm-audit! s (hash "event" "challenge-unknown" "id" (if (string? id) id ""))))
+    s))
+
+(define (memory:withdraw s id reason)
+  (let ((e (mm-find s id)))
+    (if e
+      (begin (hash-set! e "status" "withdrawn")
+             (hash-set! e "reason" (if (string? reason) reason ""))
+             (mm-audit! s (hash "event" "withdraw" "id" id
+                                "reason" (mm-get e "reason" ""))))
+      (mm-audit! s (hash "event" "withdraw-unknown" "id" (if (string? id) id ""))))
+    s))
+
+(define (memory:authority? s id)
+  (let ((e (mm-find s id)))
+    (and e (equal? (mm-get e "status" "") "valid"))))
+
+(define (mm-match? row query)
+  (let ((text (string-downcase (mm-get row "text" "")))
+        (q (string-downcase (if (string? query) query ""))))
+    (or (= (string-length q) 0) (string-contains? text q))))
+
+(define (memory:recall s query)
+  (filter (lambda (e)
+            (and (equal? (mm-get e "status" "") "valid")
+                 (mm-match? e query)))
+          (mm-list s "entries")))
+
+(define (memory:save s path)
+  (if (not (string? path))
+    (hash "ok" #f "error" "bad-path")
+    (begin
+      (make-directory "out")
+      (file-write path (json-encode s))
+      (hash "ok" #t "path" path "entries" (length (mm-list s "entries"))))))
+
+(define (memory:load path)
+  (let ((v (try (json-parse (read-file path)) (catch (e) #f))))
+    (if (and (hash? v) (equal? (mm-get v "kind" "") "personal-memory"))
+      v
+      (hash "kind" "personal-memory" "tenant" 1 "next_id" 1
+            "entries" '() "audit" '()))))
+
+(define (memory:audit s) (reverse (mm-list s "audit")))

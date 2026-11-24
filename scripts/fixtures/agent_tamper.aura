@@ -1,0 +1,13 @@
+;; Agent process fixture: it may try to write the sentinel file; the
+;; separate read-only sentinel copy must refuse it.
+(require "std/string")
+(require "std/fs")
+
+(define path (getenv "SENTINEL_PATH"))
+(display "agent-write=")
+(display
+  (try
+    (begin (file-write path (string-append (read-file path) "\n;; tamper\n"))
+           "ok")
+    (catch (e) "denied")))
+(newline)

@@ -1,0 +1,2 @@
+;; M4 scaffold: replace with the first milestone.
+(display "aura game scaffold\n")

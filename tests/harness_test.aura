@@ -1,0 +1,21 @@
+;; #42: task lease/recovery, per-task audit, tool table and budget.
+(require "std/string")
+(require "runtime/harness")
+
+(define (line k v) (display k) (display "=") (display v) (newline))
+
+(define s (harness:new (hash "tools" (list "file-read") "wall_ms" 1000)))
+(define s (harness:post s (hash "title" "inspect" "evidence" "fixture")))
+(line "claim" (hash-ref (harness:claim s 0 100) "ok"))
+(line "claim-empty" (hash-ref (harness:claim s 0 100) "error"))
+(define rec (harness:recover s 200))
+(line "recovered" (hash-ref rec "recovered"))
+(line "claim-again" (hash-ref (harness:claim s 300 100) "ok"))
+(line "complete" (hash-ref (harness:complete s "task-1" "evidence") "ok"))
+(line "tool-read" (hash-ref (harness:tool s "file-read") "ok"))
+(line "tool-shell" (hash-ref (harness:tool s "shell") "ok"))
+(line "spend" (hash-ref (harness:spend s "wall_ms" 20) "ok"))
+(line "frozen-before" (harness:frozen? s))
+(line "spend-over" (hash-ref (harness:spend s "wall_ms" 2000) "ok"))
+(line "frozen" (harness:frozen? s))
+(line "audit" (> (length (harness:audit s)) 3))

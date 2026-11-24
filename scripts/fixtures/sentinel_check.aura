@@ -1,0 +1,11 @@
+;; Separate sentinel process fixture: an unapproved external action is denied.
+(require "runtime/approval")
+
+(define s (approve:new))
+(define r (approve:request s "r1" "send" "chat:alice" 1000 0))
+(display "sentinel-decision=")
+(display (if (approve:authorized? s "r1" 10) "allow" "deny"))
+(newline)
+(display "sentinel-approval=")
+(display (hash-ref (car (hash-ref r "requests")) "status" ""))
+(newline)

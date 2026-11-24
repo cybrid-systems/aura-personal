@@ -1,0 +1,10 @@
+;; Single-user personal runtime entry. The long-lived loop lives in
+;; runtime/inbox.aura; this entry is the product's demo/preflight.
+(require "std/string")
+(require "runtime/inbox")
+
+(define st (inbox:new (hash "budget_ms" 60000)))
+(define st (inbox:message! st "hello" "stdin"))
+(display "aura-personal\n")
+(display "messages=") (display (length (hash-ref st "messages"))) (newline)
+(display "degraded=") (display (string-join (hash-ref st "degraded" '()) ",")) (newline)

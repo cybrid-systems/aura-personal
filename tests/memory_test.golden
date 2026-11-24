@@ -1,0 +1,10 @@
+recall-blue=1
+authority=#t
+challenge-authority=#f
+challenge-recall=0
+withdraw-authority=#f
+withdraw-recall=0
+save=#t
+loaded-entries=2
+loaded-pinned=#t
+loaded-withdrawn=0

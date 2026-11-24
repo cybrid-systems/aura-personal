@@ -1,0 +1,146 @@
+;; PR-4 (#42): single-user task harness.
+;;
+;; Reuses the aura task-channel semantics in-process: queued -> claimed
+;; (lease) -> completed/failed, with a per-task audit timeline and a
+;; fail-closed tool table. MCP and a real vault are kernel gaps, so they
+;; are reported as degraded, not emulated.
+
+(require "std/string")
+(require "std/list")
+
+(export harness:new harness:post harness:claim harness:complete harness:fail
+        harness:recover harness:tool harness:spend harness:audit
+        harness:task harness:frozen? harness:help)
+
+(define (hx-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (hx-num h k d) (let ((v (hx-get h k d))) (if (number? v) v d)))
+(define (hx-list h k) (let ((v (hx-get h k '()))) (if (list? v) v '())))
+
+(define (harness:help)
+  "Harness: (harness:post s task); (harness:claim s now lease_ms); (harness:complete s id evidence); (harness:tool s name)")
+
+(define (hx-audit! s id event)
+  (hash-set! s "audit"
+             (cons (hash "task" id "event" event "at_ms" (hx-num s "now_ms" 0))
+                   (hx-list s "audit")))
+  s)
+
+(define (harness:new opts)
+  (let* ((o (if (hash? opts) opts (hash)))
+         (tools (let ((v (hx-get o "tools" #f)))
+                  (if (list? v) v (list "file-read" "file-write"))))
+         (wall (hx-num o "wall_ms" 60000))
+         (tokens (hx-num o "tokens" 100000)))
+    (hash "kind" "personal-harness"
+          "now_ms" 0 "next_id" 1
+          "tasks" '() "audit" '()
+          "tools" tools
+          "budget" (hash "wall_ms" wall "tokens" tokens)
+          "used" (hash "wall_ms" 0 "tokens" 0 "failures" 0)
+          "frozen" #f
+          "degraded" (list "mcp:aura#5416" "vault:aura#5417"))))
+
+(define (harness:post s task)
+  (let* ((id (string-append "task-" (number->string (hx-num s "next_id" 1))))
+         (row (hash "id" id
+                    "title" (if (string? (hx-get task "title" #f))
+                              (hx-get task "title" "") "task")
+                    "status" "queued"
+                    "lease_until" 0
+                    "evidence" (hx-get task "evidence" #f)
+                    "reason" "")))
+    (hash-set! s "next_id" (+ 1 (hx-num s "next_id" 1)))
+    (hash-set! s "tasks" (append (hx-list s "tasks") (list row)))
+    (hx-audit! s id "posted")
+    s))
+
+(define (hx-find s id)
+  (let loop ((xs (hx-list s "tasks")))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (hx-get (car xs) "id" "") id) (car xs))
+          (else (loop (cdr xs))))))
+
+(define (harness:claim s now lease_ms)
+  (let* ((now (if (number? now) now 0))
+         (lease (if (number? lease_ms) lease_ms 30000))
+         (pick (let loop ((xs (hx-list s "tasks")))
+                 (cond ((not (pair? xs)) #f)
+                       ((equal? (hx-get (car xs) "status" "") "queued") (car xs))
+                       (else (loop (cdr xs)))))))
+    (hash-set! s "now_ms" now)
+    (if (not pick)
+      (hash "ok" #f "error" "no-queued-task")
+      (begin
+        (hash-set! pick "status" "claimed")
+        (hash-set! pick "lease_until" (+ now lease))
+        (hx-audit! s (hx-get pick "id" "") "claimed")
+        (hash "ok" #t "id" (hx-get pick "id" "") "lease_until" (+ now lease))))))
+
+(define (harness:complete s id evidence)
+  (let ((t (hx-find s id)))
+    (if (not t)
+      (hash "ok" #f "error" "unknown-task")
+      (begin
+        (hash-set! t "status" "completed")
+        (hash-set! t "lease_until" 0)
+        (hash-set! t "evidence" evidence)
+        (hx-audit! s id "completed")
+        (hash "ok" #t "id" id "status" "completed")))))
+
+(define (harness:fail s id reason)
+  (let ((t (hx-find s id)))
+    (if (not t)
+      (hash "ok" #f "error" "unknown-task")
+      (let ((used (hx-get s "used" (hash))))
+        (hash-set! used "failures" (+ 1 (hx-num used "failures" 0)))
+        (hash-set! s "used" used)
+        (hash-set! t "status" "failed")
+        (hash-set! t "lease_until" 0)
+        (hash-set! t "reason" (if (string? reason) reason ""))
+        (hx-audit! s id "failed")
+        (hash "ok" #t "id" id "status" "failed" "failures" (hx-num used "failures" 0))))))
+
+(define (harness:recover s now)
+  (let ((now (if (number? now) now 0))
+        (n 0))
+    (for-each (lambda (t)
+                (if (and (equal? (hx-get t "status" "") "claimed")
+                         (>= now (hx-num t "lease_until" 0)))
+                  (begin
+                    (hash-set! t "status" "queued")
+                    (hash-set! t "lease_until" 0)
+                    (set! n (+ n 1))
+                    (hx-audit! s (hx-get t "id" "") "lease-recovered"))))
+              (hx-list s "tasks"))
+    (hash-set! s "now_ms" now)
+    (hash "ok" #t "recovered" n)))
+
+(define (harness:tool s name)
+  (let ((allowed (let loop ((xs (hx-list s "tools")))
+                   (cond ((not (pair? xs)) #f)
+                         ((equal? (car xs) name) #t)
+                         (else (loop (cdr xs)))))))
+    (hash "ok" allowed
+          "tool" (if (string? name) name "")
+          "reason" (if allowed "allowed" "tool-not-in-table"))))
+
+(define (hx-over? used limit kind)
+  (>= (hx-num used kind 0) (hx-num limit kind 0)))
+
+(define (harness:spend s kind amount)
+  (let* ((used (hx-get s "used" (hash)))
+         (limit (hx-get s "budget" (hash)))
+         (next (+ (hx-num used kind 0) (if (number? amount) amount 0))))
+    (hash-set! used kind next)
+    (hash-set! s "used" used)
+    (if (or (hx-over? used limit "wall_ms")
+            (hx-over? used limit "tokens"))
+      (begin
+        (hash-set! s "frozen" #t)
+        (hx-audit! s "" "budget-freeze")
+        (hash "ok" #f "frozen" #t "used" used))
+      (hash "ok" #t "frozen" #f "used" used))))
+
+(define (harness:frozen? s) (equal? (hx-get s "frozen" #f) #t))
+(define (harness:task s id) (hx-find s id))
+(define (harness:audit s) (reverse (hx-list s "audit")))

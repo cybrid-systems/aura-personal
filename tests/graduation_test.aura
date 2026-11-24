@@ -1,0 +1,30 @@
+;; #44: N unattended rounds, handoff, dispatch refusal, bounded takeover.
+(require "std/string")
+(require "runtime/graduation")
+
+(define (line k v) (display k) (display "=") (display v) (newline))
+
+(define (run id ok)
+  (hash "id" id "conductor_absent" ok "evidence_pr" ok "canary" ok
+        "sentinel_untouched" ok "redlines_ok" ok "budget_active" ok
+        "pr" (if ok 100 #f)))
+
+(define s (graduation:new (hash "rounds" 2 "takeover_ms" 5000)))
+(line "initial" (graduation:status s))
+(graduation:run! s (run "r1" #t))
+(line "one" (graduation:eligible? s))
+(graduation:run! s (run "r2" #t))
+(line "eligible" (graduation:eligible? s))
+(define h (graduation:handoff s (hash "sentinel_fingerprint" "fp-1" "seed_version" "1.0.0")))
+(line "handoff" (hash-ref h "ok"))
+(line "status" (graduation:status s))
+(line "tag" (hash-ref (hash-ref h "report") "tag"))
+(line "release" (hash-ref (hash-ref h "report") "release"))
+(line "daily" (hash-ref (graduation:dispatch s (hash "kind" "feature")) "ok"))
+(line "inception" (hash-ref (graduation:dispatch s (hash "kind" "inception")) "ok"))
+(define e (graduation:escalate s (hash "kind" "stuck") 1000))
+(line "escalate" (hash-ref e "ok"))
+(line "takeover" (graduation:status s))
+(graduation:tick s 6000)
+(line "expired" (graduation:status s))
+(line "dispatch-after" (hash-ref (graduation:dispatch s (hash "kind" "feature")) "ok"))
